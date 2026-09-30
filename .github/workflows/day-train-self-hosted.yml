@@ -1,0 +1,110 @@
+name: NNUE Day Train (Self Hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset_path:
+        description: 'EPD path on the Windows runner (repo-relative or absolute)'
+        required: true
+        default: 'data/train.epd'
+        type: string
+      epochs:
+        description: 'Target epoch number (checkpoint resumes toward this total)'
+        required: true
+        default: '1000'
+        type: string
+      epoch_samples:
+        description: 'Positions per FastEpoch. Use 0 for a true full-dataset epoch.'
+        required: true
+        default: '16384'
+        type: string
+      threads:
+        description: 'CPU threads. 2 is the low-load default.'
+        required: true
+        default: '2'
+        type: string
+      hidden:
+        description: 'Hidden width'
+        required: true
+        default: '64'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nnue-day-train-self-hosted
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 1430
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Build trainer
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j 2
+
+      - name: Resolve executable
+        id: exe
+        run: |
+          if (Test-Path "build/Release/nnue_train.exe") {
+            "path=build/Release/nnue_train.exe" >> $env:GITHUB_OUTPUT
+          } elseif (Test-Path "build/nnue_train.exe") {
+            "path=build/nnue_train.exe" >> $env:GITHUB_OUTPUT
+          } else {
+            throw "nnue_train.exe not found"
+          }
+
+      - name: Verify dataset
+        run: |
+          $p = "${{ inputs.dataset_path }}"
+          if (-not (Test-Path $p)) {
+            throw "Dataset not found: $p"
+          }
+          Get-Item $p | Format-List FullName,Length,LastWriteTime
+
+      - name: Preprocess EPD
+        run: |
+          New-Item -ItemType Directory -Force -Path data | Out-Null
+          & "${{ steps.exe.outputs.path }}" preprocess `
+            --input "${{ inputs.dataset_path }}" `
+            --output data/train.nnueb
+
+      - name: Train CPU NNUE
+        env:
+          OMP_NUM_THREADS: ${{ inputs.threads }}
+          OMP_DYNAMIC: 'FALSE'
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          & "${{ steps.exe.outputs.path }}" train `
+            --data data/train.nnueb `
+            --checkpoint out/checkpoint.bin `
+            --export out/net.nnue `
+            --metrics out/metrics.csv `
+            --epochs "${{ inputs.epochs }}" `
+            --epoch-samples "${{ inputs.epoch_samples }}" `
+            --threads "${{ inputs.threads }}" `
+            --hidden "${{ inputs.hidden }}" `
+            --minutes 1380 `
+            --save-every 10
+
+      - name: Upload trained network
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastnnue-output-${{ github.run_number }}
+          path: |
+            out/checkpoint.bin
+            out/net.nnue
+            out/metrics.csv
+          if-no-files-found: warn
+          retention-days: 30
