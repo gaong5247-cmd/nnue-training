@@ -1,0 +1,7 @@
+/build/
+/out/
+*.nnueb
+*.bin
+*.nnue
+*.csv
+data/train.epd
